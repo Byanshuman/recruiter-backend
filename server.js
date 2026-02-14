@@ -929,12 +929,14 @@ app.post('/api/ai/screen', async (req, res) => {
         let gapsOut = gaps.length > 0 ? gaps : [];
         let recommendationOut = deterministicRecommendation;
 
-        // AI is narrative-only: score remains deterministic and cannot be overridden.
+        let fitScoreOut = deterministic.finalFitScore;
+        let confidenceOut = deterministic.confidenceScore;
+
+        // AI-first scoring + narrative with strict schema and fallback to deterministic values.
         if (apiKey) {
             const systemPrompt = [
                 'You are a senior hiring panel analyst producing enterprise-grade hiring feedback.',
-                'You are operating inside a deterministic scoring system.',
-                'You are NOT allowed to alter, influence, or reinterpret numeric scores.',
+                'You are responsible for generating numeric scoring and evidence-bound feedback.',
                 'STRICT OPERATIONAL CONSTRAINTS:',
                 '1. You MUST use ONLY the provided structured inputs: matchedSkills[], missingSkills[], experienceSummary, jobTitle (optional context only).',
                 '2. You MUST NOT infer new skills, expand abbreviations into new competencies, derive skills from company names, assume certifications, assume language proficiency, infer domain expertise not explicitly listed, or modify/reinterpret numeric scoring signals.',
@@ -944,9 +946,11 @@ app.post('/api/ai/screen', async (req, res) => {
                 '6. recommendation MUST be based strictly on coverage and experience alignment, neutral and evidence-based.',
                 '7. Feedback must be deterministic-aligned, evidence-traceable, audit-ready, and HR-compliant.',
                 'OUTPUT REQUIREMENTS:',
-                'Return STRICT JSON only with schema: {"strengths": string[], "gaps": string[], "recommendation": string}.',
+                'Return STRICT JSON only with schema: {"fitScore": number, "confidence": number, "strengths": string[], "gaps": string[], "recommendation": string}.',
+                'fitScore must be an integer from 0 to 100.',
+                'confidence must be a decimal from 0 to 1 with up to 3 decimals.',
                 'Recommendation must be concise (2-4 sentences), reference only provided structured evidence, and avoid speculation.',
-                'If insufficient data is provided, return {"strengths":[],"gaps":[],"recommendation":"Insufficient structured data for evaluation."}',
+                'If insufficient data is provided, return {"fitScore":0,"confidence":0,"strengths":[],"gaps":[],"recommendation":"Insufficient structured data for evaluation."}',
                 'FAIL-SAFE RULE: if any instruction conflicts with evidence boundaries, default to omission rather than speculation.'
             ].join(' ');
             const experienceSummary = deterministic.experienceMatchScore >= 1
@@ -957,7 +961,12 @@ app.post('/api/ai/screen', async (req, res) => {
                 jobTitle: job.title || '',
                 matchedSkills: strengths,
                 missingSkills: gaps,
-                experienceSummary
+                experienceSummary,
+                scoringContext: {
+                    requiredRatio: deterministic.requiredRatio,
+                    preferredRatio: deterministic.preferredRatio,
+                    experienceMatchScore: deterministic.experienceMatchScore
+                }
             });
 
             try {
@@ -998,13 +1007,19 @@ app.post('/api/ai/screen', async (req, res) => {
                         && sentenceCount(safeRecommendation) >= 2
                         && sentenceCount(safeRecommendation) <= 4
                         && !hasSpeculativeLanguage(safeRecommendation);
+                    const aiFitScore = Number(parsed?.fitScore);
+                    const aiConfidence = Number(parsed?.confidence);
+                    const isFitScoreValid = Number.isFinite(aiFitScore) && aiFitScore >= 0 && aiFitScore <= 100;
+                    const isConfidenceValid = Number.isFinite(aiConfidence) && aiConfidence >= 0 && aiConfidence <= 1;
 
                     strengthsOut = safeStrengths;
                     gapsOut = safeGaps;
                     if (isRecommendationValid) recommendationOut = safeRecommendation;
+                    if (isFitScoreValid) fitScoreOut = Math.round(aiFitScore);
+                    if (isConfidenceValid) confidenceOut = Number(aiConfidence.toFixed(3));
                 }
             } catch {
-                // keep deterministic narrative on AI failure
+                // keep deterministic fallback on AI failure
             }
         }
 
@@ -1013,8 +1028,8 @@ app.post('/api/ai/screen', async (req, res) => {
         }
 
         res.json({
-            fitScore: deterministic.finalFitScore,
-            confidence: deterministic.confidenceScore,
+            fitScore: fitScoreOut,
+            confidence: confidenceOut,
             strengths: strengthsOut,
             gaps: gapsOut,
             recommendation: recommendationOut,
