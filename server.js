@@ -27,7 +27,10 @@ const { calendar, CALENDAR_ID } = require('./config/googleCalendar');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
+<<<<<<< HEAD
 
+=======
+>>>>>>> d5cdd3a (Fix Cloud Run port to 8080)
 
 app.use(cors());
 app.use(express.json());
