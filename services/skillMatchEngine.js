@@ -1,8 +1,32 @@
-const SCORING_MODEL_VERSION = 'RIE-SkillMatch-v1.0';
+const SCORING_MODEL_VERSION = 'RIE-SkillMatch-v1.1';
+const skillOntology = require('../ontology/skills.json');
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
-const normalizeSkill = (value) => String(value || '').toLowerCase().trim();
+const canonicalText = (value) => String(value || '')
+  .toLowerCase()
+  .trim()
+  .replace(/[_-]+/g, ' ')
+  .replace(/\s+/g, ' ');
+
+const ONTOLOGY_INDEX = (() => {
+  const index = new Map();
+  Object.entries(skillOntology || {}).forEach(([canonical, variants]) => {
+    const canonicalKey = canonicalText(canonical);
+    index.set(canonicalKey, canonicalKey);
+    (variants || []).forEach((variant) => {
+      index.set(canonicalText(variant), canonicalKey);
+    });
+  });
+  return index;
+})();
+
+const normalizeSkill = (value) => {
+  const normalized = canonicalText(value);
+  if (!normalized) return '';
+  // Deterministic-only: map only when exact ontology key/variant is defined.
+  return ONTOLOGY_INDEX.get(normalized) || normalized;
+};
 
 const uniqueNormalized = (values) => {
   const seen = new Set();
