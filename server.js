@@ -893,11 +893,31 @@ app.post('/api/ai/screen', async (req, res) => {
             return res.status(400).json({ error: 'Missing candidate or job payload' });
         }
 
+        const parseIncomingSkills = (rawSkills) => {
+            if (Array.isArray(rawSkills)) {
+                return rawSkills
+                    .map((item) => {
+                        if (typeof item === 'string') return item;
+                        if (item && typeof item === 'object') return item.label || item.name || '';
+                        return '';
+                    })
+                    .map((s) => String(s || '').trim())
+                    .filter(Boolean);
+            }
+            if (typeof rawSkills === 'string') {
+                return rawSkills
+                    .split(/[,\n;|]/)
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+            }
+            return [];
+        };
+
         // Deterministic-only strategy score: strict skill match + experience, no inferred skills.
         const parsedCandidate = {
             name: candidate.name || 'Not Found',
-            experienceYears: Number(candidate.experience) || 0,
-            skills: Array.isArray(candidate.skills) ? candidate.skills : []
+            experienceYears: Number(candidate.experienceYears ?? candidate.experience) || 0,
+            skills: parseIncomingSkills(candidate.skills)
         };
         const deterministic = skillMatchEngine.evaluateSkillMatch({
             parsed: parsedCandidate,
