@@ -533,6 +533,118 @@ const sanitizeAiScreenResult = (raw) => {
     };
 };
 
+const AI_STOPWORDS = new Set([
+    'and', 'or', 'the', 'a', 'an', 'to', 'of', 'for', 'with', 'in', 'on', 'at', 'by', 'from', 'as',
+    'is', 'are', 'this', 'that', 'be', 'will', 'we', 'you', 'our', 'your', 'candidate', 'job'
+]);
+
+const tokenizeText = (value) => String(value || '')
+    .toLowerCase()
+    .split(/[^a-z0-9+.#]/g)
+    .map(token => token.trim())
+    .filter(token => token.length > 2 && !AI_STOPWORDS.has(token));
+
+const uniqueList = (items) => Array.from(new Set((items || []).map(String).map(v => v.trim()).filter(Boolean)));
+
+const capList = (items, size = 4) => uniqueList(items).slice(0, size);
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const buildScreenSignals = (candidate, job) => {
+    const candidateSkills = Array.isArray(candidate?.skills) ? candidate.skills.map(String) : [];
+    const requiredSkills = Array.isArray(job?.requiredSkills) ? job.requiredSkills.map(String) : [];
+    const preferredSkills = Array.isArray(job?.preferredSkills) ? job.preferredSkills.map(String) : [];
+
+    const candidateTokens = new Set([
+        ...tokenizeText(candidate?.role),
+        ...candidateSkills.flatMap(tokenizeText)
+    ]);
+
+    const matchedRequired = requiredSkills.filter(skill => tokenizeText(skill).some(t => candidateTokens.has(t)));
+    const missingRequired = requiredSkills.filter(skill => !matchedRequired.includes(skill));
+    const matchedPreferred = preferredSkills.filter(skill => tokenizeText(skill).some(t => candidateTokens.has(t)));
+    const missingPreferred = preferredSkills.filter(skill => !matchedPreferred.includes(skill));
+
+    const minExperience = Number(job?.minExperience) || 0;
+    const candidateExperience = Number(candidate?.experience) || 0;
+    const experienceGap = Math.max(0, minExperience - candidateExperience);
+
+    const requiredRatio = requiredSkills.length > 0 ? matchedRequired.length / requiredSkills.length : 0.5;
+    const preferredRatio = preferredSkills.length > 0 ? matchedPreferred.length / preferredSkills.length : 0.5;
+    const experienceScore = minExperience > 0
+        ? (candidateExperience >= minExperience ? 1 : clamp(1 - (experienceGap / Math.max(minExperience, 1)), 0, 1))
+        : 0.8;
+
+    const fitScore = Math.round(clamp(30 + (requiredRatio * 45) + (preferredRatio * 15) + (experienceScore * 10), 0, 100));
+    const confidence = Math.round(clamp(0.55 + (requiredSkills.length > 0 ? 0.1 : 0) + (preferredSkills.length > 0 ? 0.05 : 0), 0.45, 0.95) * 1000) / 1000;
+
+    const strengths = capList([
+        ...matchedRequired,
+        ...matchedPreferred,
+        ...candidateSkills
+    ]);
+
+    const gaps = capList([
+        ...missingRequired,
+        ...missingPreferred,
+        ...(experienceGap > 0 ? [`Needs ${experienceGap} more year(s) experience for role baseline`] : [])
+    ]);
+
+    const recommendation = fitScore >= 80
+        ? 'Strong fit. Fast-track to interview and validate depth through practical scenarios.'
+        : fitScore >= 60
+            ? 'Moderate fit. Proceed with a structured screen focused on missing role requirements.'
+            : 'Partial fit. Consider alternate openings or targeted upskilling before progression.';
+
+    return {
+        fitScore,
+        confidence,
+        strengths: strengths.length ? strengths : capList(candidateSkills, 3),
+        gaps: gaps.length ? gaps : ['Limited evidence against stated requirements'],
+        recommendation,
+        matchedRequired,
+        missingRequired,
+        matchedPreferred,
+        missingPreferred,
+        minExperience,
+        candidateExperience
+    };
+};
+
+const isLineRelevant = (line, signals) => {
+    const tokens = tokenizeText(line);
+    if (tokens.length === 0) return false;
+    const allowedTokens = new Set([
+        ...signals.strengths.flatMap(tokenizeText),
+        ...signals.gaps.flatMap(tokenizeText),
+        ...signals.matchedRequired.flatMap(tokenizeText),
+        ...signals.missingRequired.flatMap(tokenizeText),
+        ...signals.matchedPreferred.flatMap(tokenizeText),
+        ...signals.missingPreferred.flatMap(tokenizeText)
+    ]);
+    return tokens.some(token => allowedTokens.has(token));
+};
+
+const mergeAiWithDeterministic = (ai, baseline) => {
+    if (!ai) return baseline;
+
+    const filteredStrengths = capList((ai.strengths || []).filter(item => isLineRelevant(item, baseline)));
+    const filteredGaps = capList((ai.gaps || []).filter(item => isLineRelevant(item, baseline)));
+
+    const blendedFit = Math.round(clamp((ai.fitScore * 0.7) + (baseline.fitScore * 0.3), 0, 100));
+    const blendedConfidence = Math.round(clamp((ai.confidence * 0.7) + (baseline.confidence * 0.3), 0.45, 0.98) * 1000) / 1000;
+
+    return {
+        fitScore: blendedFit,
+        confidence: blendedConfidence,
+        strengths: filteredStrengths.length >= 2 ? filteredStrengths : baseline.strengths,
+        gaps: filteredGaps.length >= 2 ? filteredGaps : baseline.gaps,
+        recommendation: (ai.recommendation && String(ai.recommendation).trim().length > 20)
+            ? String(ai.recommendation).trim()
+            : baseline.recommendation
+    };
+};
+
 app.post('/api/ai/screen', async (req, res) => {
     try {
         const { candidate, job } = req.body || {};
@@ -545,13 +657,27 @@ app.post('/api/ai/screen', async (req, res) => {
             return res.status(400).json({ error: 'Missing candidate or job payload' });
         }
 
+        const deterministic = buildScreenSignals(candidate, job);
+
         const systemPrompt = [
             'You are an expert recruitment analyst.',
-            'Return a strict JSON object with keys: fitScore (0-100 integer), confidence (0-1 number), strengths (array of short strings), gaps (array of short strings), recommendation (string).',
+            'Use ONLY the supplied signals and payload. Do not invent requirements or qualifications.',
+            'Never infer language, geography, certifications, or domain experience unless explicitly present in the provided data.',
+            'Strengths must come from matched skills/evidence. Gaps must come from missing required/preferred skills or experience gap.',
+            'Return a strict JSON object with keys: fitScore (0-100 integer), confidence (0-1 number), strengths (array max 4 concise strings), gaps (array max 4 concise strings), recommendation (string).',
             'Do not include any extra text outside JSON.'
         ].join(' ');
 
-        const userPrompt = `Candidate:\n${JSON.stringify(candidate)}\n\nJob:\n${JSON.stringify(job)}`;
+        const userPrompt = `Candidate:\n${JSON.stringify(candidate)}\n\nJob:\n${JSON.stringify(job)}\n\nDeterministicSignals:\n${JSON.stringify({
+            matchedRequired: deterministic.matchedRequired,
+            missingRequired: deterministic.missingRequired,
+            matchedPreferred: deterministic.matchedPreferred,
+            missingPreferred: deterministic.missingPreferred,
+            minExperience: deterministic.minExperience,
+            candidateExperience: deterministic.candidateExperience,
+            baselineFitScore: deterministic.fitScore,
+            baselineConfidence: deterministic.confidence
+        })}`;
 
         const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
@@ -580,10 +706,7 @@ app.post('/api/ai/screen', async (req, res) => {
         const content = data?.choices?.[0]?.message?.content || '';
         const parsed = extractJson(content);
         const sanitized = sanitizeAiScreenResult(parsed);
-        if (!sanitized) {
-            return res.status(422).json({ error: 'Invalid AI response format' });
-        }
-        res.json(sanitized);
+        res.json(mergeAiWithDeterministic(sanitized, deterministic));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
