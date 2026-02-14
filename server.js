@@ -931,6 +931,12 @@ app.post('/api/ai/screen', async (req, res) => {
 
         let fitScoreOut = deterministic.finalFitScore;
         let confidenceOut = deterministic.confidenceScore;
+        const expectedFitScore = Math.round(
+            clamp((deterministic.requiredRatio * 60) + (deterministic.preferredRatio * 20) + (deterministic.experienceMatchScore * 20), 0, 100)
+        );
+        const expectedConfidence = Number(
+            clamp((deterministic.requiredRatio * 0.5) + (deterministic.experienceMatchScore * 0.3) + (deterministic.dataCompleteness * 0.2), 0, 1).toFixed(3)
+        );
 
         // AI-first scoring + narrative with strict schema and fallback to deterministic values.
         if (apiKey) {
@@ -939,12 +945,16 @@ app.post('/api/ai/screen', async (req, res) => {
                 'You are responsible for generating numeric scoring and evidence-bound feedback.',
                 'STRICT OPERATIONAL CONSTRAINTS:',
                 '1. You MUST use ONLY the provided structured inputs: matchedSkills[], missingSkills[], experienceSummary, jobTitle (optional context only).',
-                '2. You MUST NOT infer new skills, expand abbreviations into new competencies, derive skills from company names, assume certifications, assume language proficiency, infer domain expertise not explicitly listed, or modify/reinterpret numeric scoring signals.',
+                '2. You MUST NOT infer new skills, expand abbreviations into new competencies, derive skills from company names, assume certifications, assume language proficiency, or infer domain expertise not explicitly listed.',
                 '3. You MUST NOT introduce bias related to gender, ethnicity, geography, education prestige, or organization names.',
                 '4. strengths[] MUST be an exact subset of matchedSkills[]. No grouping, semantic expansion, or rewording.',
                 '5. gaps[] MUST be an exact subset of missingSkills[].',
                 '6. recommendation MUST be based strictly on coverage and experience alignment, neutral and evidence-based.',
                 '7. Feedback must be deterministic-aligned, evidence-traceable, audit-ready, and HR-compliant.',
+                '8. Numeric scoring rule is mandatory:',
+                'fitScore = round((requiredRatio * 60) + (preferredRatio * 20) + (experienceMatchScore * 20)), clamped 0..100.',
+                'confidence = round((requiredRatio * 0.5) + (experienceMatchScore * 0.3) + (dataCompleteness * 0.2), 3 decimals), clamped 0..1.',
+                'Do not use any alternate formula, heuristic, or subjective override.',
                 'OUTPUT REQUIREMENTS:',
                 'Return STRICT JSON only with schema: {"fitScore": number, "confidence": number, "strengths": string[], "gaps": string[], "recommendation": string}.',
                 'fitScore must be an integer from 0 to 100.',
@@ -965,7 +975,8 @@ app.post('/api/ai/screen', async (req, res) => {
                 scoringContext: {
                     requiredRatio: deterministic.requiredRatio,
                     preferredRatio: deterministic.preferredRatio,
-                    experienceMatchScore: deterministic.experienceMatchScore
+                    experienceMatchScore: deterministic.experienceMatchScore,
+                    dataCompleteness: deterministic.dataCompleteness
                 }
             });
 
@@ -1011,12 +1022,14 @@ app.post('/api/ai/screen', async (req, res) => {
                     const aiConfidence = Number(parsed?.confidence);
                     const isFitScoreValid = Number.isFinite(aiFitScore) && aiFitScore >= 0 && aiFitScore <= 100;
                     const isConfidenceValid = Number.isFinite(aiConfidence) && aiConfidence >= 0 && aiConfidence <= 1;
+                    const isFitScoreCoherent = Math.abs(Math.round(aiFitScore) - expectedFitScore) <= 3;
+                    const isConfidenceCoherent = Math.abs(Number(aiConfidence.toFixed(3)) - expectedConfidence) <= 0.08;
 
                     strengthsOut = safeStrengths;
                     gapsOut = safeGaps;
                     if (isRecommendationValid) recommendationOut = safeRecommendation;
-                    if (isFitScoreValid) fitScoreOut = Math.round(aiFitScore);
-                    if (isConfidenceValid) confidenceOut = Number(aiConfidence.toFixed(3));
+                    if (isFitScoreValid && isFitScoreCoherent) fitScoreOut = Math.round(aiFitScore);
+                    if (isConfidenceValid && isConfidenceCoherent) confidenceOut = Number(aiConfidence.toFixed(3));
                 }
             } catch {
                 // keep deterministic fallback on AI failure
