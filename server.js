@@ -887,6 +887,8 @@ const fuseRieResult = (ai, deterministic, meta) => {
 app.post('/api/ai/screen', async (req, res) => {
     try {
         const { candidate, job } = req.body || {};
+        const apiKey = process.env.OPENROUTER_API_KEY;
+        const model = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
         if (!candidate || !job) {
             return res.status(400).json({ error: 'Missing candidate or job payload' });
         }
@@ -911,18 +913,84 @@ app.post('/api/ai/screen', async (req, res) => {
             ...deterministic.missingPreferredSkills
         ];
 
-        const recommendation = deterministic.hiringRecommendation === 'Strong Match'
+        const deterministicRecommendation = deterministic.hiringRecommendation === 'Strong Match'
             ? 'Strongly recommend for interview progression based on required skill alignment and experience fit.'
             : deterministic.hiringRecommendation === 'Moderate Match'
                 ? 'Moderate fit. Proceed with targeted screening for missing required capabilities.'
                 : 'Weak fit. Consider alternate role mapping or skill-bridge plan before progression.';
 
+        let strengthsOut = strengths.length > 0 ? strengths : ['No explicitly matched skills found'];
+        let gapsOut = gaps.length > 0 ? gaps : ['No major skill gaps identified'];
+        let recommendationOut = deterministicRecommendation;
+
+        // AI is narrative-only: score remains deterministic and cannot be overridden.
+        if (apiKey) {
+            const systemPrompt = [
+                'You are a senior hiring panel analyst writing industry-grade hiring feedback.',
+                'Do NOT produce or modify numeric scores.',
+                'Use ONLY provided matched/missing skills and experience summary.',
+                'Do NOT infer new skills, languages, certifications, or domain expertise.',
+                'Return strict JSON only with keys: strengths (string[]), gaps (string[]), recommendation (string).',
+                'strengths must be subset of matched skills; gaps must be subset of missing skills.'
+            ].join(' ');
+
+            const userPrompt = JSON.stringify({
+                candidateName: candidate.name || 'Unknown',
+                jobTitle: job.title || 'Unknown',
+                matchedSkills: strengths,
+                missingSkills: gaps,
+                requiredRatio: deterministic.requiredRatio,
+                preferredRatio: deterministic.preferredRatio,
+                experienceMatchScore: deterministic.experienceMatchScore,
+                hiringRecommendation: deterministic.hiringRecommendation
+            });
+
+            try {
+                const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json',
+                        ...(process.env.OPENROUTER_SITE_URL ? { 'HTTP-Referer': process.env.OPENROUTER_SITE_URL } : {}),
+                        ...(process.env.OPENROUTER_APP_NAME ? { 'X-Title': process.env.OPENROUTER_APP_NAME } : {})
+                    },
+                    body: JSON.stringify({
+                        model,
+                        messages: [
+                            { role: 'system', content: systemPrompt },
+                            { role: 'user', content: userPrompt }
+                        ],
+                        temperature: 0.2
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    const content = data?.choices?.[0]?.message?.content || '';
+                    const parsed = extractJson(content);
+                    const safeStrengths = Array.isArray(parsed?.strengths)
+                        ? parsed.strengths.map(v => String(v || '').trim().toLowerCase()).filter(v => v && strengths.map(x => x.toLowerCase()).includes(v))
+                        : [];
+                    const safeGaps = Array.isArray(parsed?.gaps)
+                        ? parsed.gaps.map(v => String(v || '').trim().toLowerCase()).filter(v => v && gaps.map(x => x.toLowerCase()).includes(v))
+                        : [];
+                    const safeRecommendation = typeof parsed?.recommendation === 'string' ? parsed.recommendation.trim() : '';
+
+                    if (safeStrengths.length > 0) strengthsOut = safeStrengths.map(s => s.replace(/^./, c => c.toUpperCase()));
+                    if (safeGaps.length > 0) gapsOut = safeGaps.map(g => g.replace(/^./, c => c.toUpperCase()));
+                    if (safeRecommendation.length >= 20) recommendationOut = safeRecommendation;
+                }
+            } catch {
+                // keep deterministic narrative on AI failure
+            }
+        }
+
         res.json({
             fitScore: deterministic.finalFitScore,
             confidence: deterministic.confidenceScore,
-            strengths: strengths.length > 0 ? strengths : ['No explicitly matched skills found'],
-            gaps: gaps.length > 0 ? gaps : ['No major skill gaps identified'],
-            recommendation,
+            strengths: strengthsOut,
+            gaps: gapsOut,
+            recommendation: recommendationOut,
             requiredRatio: deterministic.requiredRatio,
             preferredRatio: deterministic.preferredRatio,
             experienceMatchScore: deterministic.experienceMatchScore,
