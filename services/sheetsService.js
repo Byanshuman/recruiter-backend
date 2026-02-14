@@ -115,6 +115,25 @@ const mapRowToObj = (sheetName, row) => {
             dataRetentionDays: getNumber(row, 6, 365)
         };
     }
+    if (sheetName === 'CVReviews') {
+        return {
+            id: getVal(row, 0),
+            timestamp: getVal(row, 1),
+            candidateName: getVal(row, 2),
+            skills: getVal(row, 3),
+            experienceYears: getNumber(row, 4, 0),
+            selectedJob: getVal(row, 5),
+            fitScore: getNumber(row, 6, 0),
+            matchedRequiredSkills: getVal(row, 7),
+            missingRequiredSkills: getVal(row, 8),
+            cvText: getVal(row, 9),
+            requiredRatio: Number(getVal(row, 10, 0)) || 0,
+            preferredRatio: Number(getVal(row, 11, 0)) || 0,
+            experienceMatchScore: Number(getVal(row, 12, 0)) || 0,
+            confidenceScore: Number(getVal(row, 13, 0)) || 0,
+            scoringModelVersion: getVal(row, 14)
+        };
+    }
     return null;
 };
 
@@ -190,6 +209,25 @@ const mapObjToRow = (sheetName, obj) => {
             obj.defaultCurrency, obj.timezone, obj.dataRetentionDays
         ];
     }
+    if (sheetName === 'CVReviews') {
+        return [
+            obj.id || '',
+            obj.timestamp || new Date().toISOString(),
+            obj.candidateName || '',
+            obj.skills || '',
+            obj.experienceYears ?? 0,
+            obj.selectedJob || '',
+            obj.fitScore ?? 0,
+            obj.matchedRequiredSkills || '',
+            obj.missingRequiredSkills || '',
+            obj.cvText || '',
+            obj.requiredRatio ?? 0,
+            obj.preferredRatio ?? 0,
+            obj.experienceMatchScore ?? 0,
+            obj.confidenceScore ?? 0,
+            obj.scoringModelVersion || ''
+        ];
+    }
     return [];
 };
 
@@ -237,11 +275,26 @@ const sheetsService = {
             }
             return rows
                 .map(row => mapRowToObj(sheetName, row))
-                .filter(item => item !== null && (item.id || item.companyName));
+                .filter(item => item !== null && (item.id || item.companyName || item.candidateName));
         } catch (error) {
             console.error(`Error reading ${sheetName}:`, error.message);
             throw error;
         }
+    },
+
+    async appendCvReviewUnique(data) {
+        this.ensureSheets();
+        const existing = await this.getData('CVReviews');
+        const name = (data.candidateName || '').toString().trim().toLowerCase();
+        const timestamp = (data.timestamp || '').toString().trim();
+        const duplicate = existing.find((row) =>
+            (row.candidateName || '').toString().trim().toLowerCase() === name &&
+            (row.timestamp || '').toString().trim() === timestamp
+        );
+        if (duplicate) {
+            return duplicate;
+        }
+        return await this.appendData('CVReviews', data);
     },
 
     async appendData(sheetName, data) {

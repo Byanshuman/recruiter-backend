@@ -25,6 +25,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const sheetsService = require('./services/sheetsService');
 const cvReviewEngine = require('./services/cvReviewEngine');
+const skillMatchEngine = require('./services/skillMatchEngine');
 const { calendar, CALENDAR_ID, CALENDAR_INIT_ERROR } = require('./config/googleCalendar');
 const roleModels = require('./config/roleModels');
 const skillOntology = require('./ontology/skills.json');
@@ -320,6 +321,55 @@ app.get('/api/jobs', async (req, res) => {
     try {
         const data = await sheetsService.getData('Jobs');
         res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/rie/parse-cv-strict', async (req, res) => {
+    try {
+        const { parsedResumeText, candidate } = req.body || {};
+        if (!parsedResumeText || typeof parsedResumeText !== 'string') {
+            return res.status(400).json({ error: 'parsedResumeText is required.' });
+        }
+        const parsed = skillMatchEngine.parseCvStrict(parsedResumeText, candidate || {});
+        res.json({ parsed });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/rie/skill-match', async (req, res) => {
+    try {
+        const { parsedResumeText, candidate, selectedJobId, selectedJob } = req.body || {};
+        if (!parsedResumeText || typeof parsedResumeText !== 'string') {
+            return res.status(400).json({ error: 'parsedResumeText is required.' });
+        }
+        if ((!selectedJobId || typeof selectedJobId !== 'string') && !selectedJob) {
+            return res.status(400).json({ error: 'selectedJobId or selectedJob is required.' });
+        }
+
+        let job = selectedJob || null;
+        if (!job && selectedJobId) {
+            const jobs = await sheetsService.getData('Jobs');
+            job = jobs.find(j => (j.id || '').toString() === selectedJobId);
+        }
+        if (!job) {
+            return res.status(404).json({ error: 'Selected job not found.' });
+        }
+
+        const parsed = skillMatchEngine.parseCvStrict(parsedResumeText, candidate || {});
+        const result = skillMatchEngine.evaluateSkillMatch({ parsed, job });
+        const sheetRecord = skillMatchEngine.buildSheetRecord({
+            cvText: parsedResumeText,
+            parsed,
+            selectedJob: job,
+            result
+        });
+
+        await sheetsService.appendCvReviewUnique(sheetRecord);
+
+        res.json(result);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
