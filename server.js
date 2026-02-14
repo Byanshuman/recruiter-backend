@@ -912,37 +912,52 @@ app.post('/api/ai/screen', async (req, res) => {
             ...deterministic.missingRequiredSkills,
             ...deterministic.missingPreferredSkills
         ];
+        const normalizeSkill = (value) => String(value || '').trim().toLowerCase();
+        const sentenceCount = (text) => String(text || '')
+            .split(/[.!?]+/)
+            .map((s) => s.trim())
+            .filter(Boolean).length;
+        const hasSpeculativeLanguage = (text) => /\b(likely|probably|may have|seems to)\b/i.test(String(text || ''));
 
         const deterministicRecommendation = deterministic.hiringRecommendation === 'Strong Match'
-            ? 'Strongly recommend for interview progression based on required skill alignment and experience fit.'
+            ? 'Required skill coverage is strong and experience aligns with role expectations. Recommend interview progression.'
             : deterministic.hiringRecommendation === 'Moderate Match'
-                ? 'Moderate fit. Proceed with targeted screening for missing required capabilities.'
-                : 'Weak fit. Consider alternate role mapping or skill-bridge plan before progression.';
+                ? 'Coverage is partial with identifiable required-skill gaps. Proceed only with targeted screening for missing capabilities.'
+                : 'Required skill gaps are material relative to current role requirements. Recommend alternate role mapping or skill-bridge plan before progression.';
 
-        let strengthsOut = strengths.length > 0 ? strengths : ['No explicitly matched skills found'];
-        let gapsOut = gaps.length > 0 ? gaps : ['No major skill gaps identified'];
+        let strengthsOut = strengths.length > 0 ? strengths : [];
+        let gapsOut = gaps.length > 0 ? gaps : [];
         let recommendationOut = deterministicRecommendation;
 
         // AI is narrative-only: score remains deterministic and cannot be overridden.
         if (apiKey) {
             const systemPrompt = [
-                'You are a senior hiring panel analyst writing industry-grade hiring feedback.',
-                'Do NOT produce or modify numeric scores.',
-                'Use ONLY provided matched/missing skills and experience summary.',
-                'Do NOT infer new skills, languages, certifications, or domain expertise.',
-                'Return strict JSON only with keys: strengths (string[]), gaps (string[]), recommendation (string).',
-                'strengths must be subset of matched skills; gaps must be subset of missing skills.'
+                'You are a senior hiring panel analyst producing enterprise-grade hiring feedback.',
+                'You are operating inside a deterministic scoring system.',
+                'You are NOT allowed to alter, influence, or reinterpret numeric scores.',
+                'STRICT OPERATIONAL CONSTRAINTS:',
+                '1. You MUST use ONLY the provided structured inputs: matchedSkills[], missingSkills[], experienceSummary, jobTitle (optional context only).',
+                '2. You MUST NOT infer new skills, expand abbreviations into new competencies, derive skills from company names, assume certifications, assume language proficiency, infer domain expertise not explicitly listed, or modify/reinterpret numeric scoring signals.',
+                '3. You MUST NOT introduce bias related to gender, ethnicity, geography, education prestige, or organization names.',
+                '4. strengths[] MUST be an exact subset of matchedSkills[]. No grouping, semantic expansion, or rewording.',
+                '5. gaps[] MUST be an exact subset of missingSkills[].',
+                '6. recommendation MUST be based strictly on coverage and experience alignment, neutral and evidence-based.',
+                '7. Feedback must be deterministic-aligned, evidence-traceable, audit-ready, and HR-compliant.',
+                'OUTPUT REQUIREMENTS:',
+                'Return STRICT JSON only with schema: {"strengths": string[], "gaps": string[], "recommendation": string}.',
+                'Recommendation must be concise (2-4 sentences), reference only provided structured evidence, and avoid speculation.',
+                'If insufficient data is provided, return {"strengths":[],"gaps":[],"recommendation":"Insufficient structured data for evaluation."}',
+                'FAIL-SAFE RULE: if any instruction conflicts with evidence boundaries, default to omission rather than speculation.'
             ].join(' ');
+            const experienceSummary = deterministic.experienceMatchScore >= 1
+                ? `Experience meets minimum requirement (${Number(parsedCandidate.experienceYears || 0)} years).`
+                : `Experience is below minimum requirement (${Number(parsedCandidate.experienceYears || 0)} years).`;
 
             const userPrompt = JSON.stringify({
-                candidateName: candidate.name || 'Unknown',
-                jobTitle: job.title || 'Unknown',
+                jobTitle: job.title || '',
                 matchedSkills: strengths,
                 missingSkills: gaps,
-                requiredRatio: deterministic.requiredRatio,
-                preferredRatio: deterministic.preferredRatio,
-                experienceMatchScore: deterministic.experienceMatchScore,
-                hiringRecommendation: deterministic.hiringRecommendation
+                experienceSummary
             });
 
             try {
@@ -968,21 +983,33 @@ app.post('/api/ai/screen', async (req, res) => {
                     const data = await response.json();
                     const content = data?.choices?.[0]?.message?.content || '';
                     const parsed = extractJson(content);
+                    const allowedStrengths = new Map(strengths.map((s) => [normalizeSkill(s), s]));
+                    const allowedGaps = new Map(gaps.map((g) => [normalizeSkill(g), g]));
                     const safeStrengths = Array.isArray(parsed?.strengths)
-                        ? parsed.strengths.map(v => String(v || '').trim().toLowerCase()).filter(v => v && strengths.map(x => x.toLowerCase()).includes(v))
+                        ? [...new Set(parsed.strengths.map((v) => normalizeSkill(v)).filter((v) => allowedStrengths.has(v)))]
+                            .map((v) => allowedStrengths.get(v))
                         : [];
                     const safeGaps = Array.isArray(parsed?.gaps)
-                        ? parsed.gaps.map(v => String(v || '').trim().toLowerCase()).filter(v => v && gaps.map(x => x.toLowerCase()).includes(v))
+                        ? [...new Set(parsed.gaps.map((v) => normalizeSkill(v)).filter((v) => allowedGaps.has(v)))]
+                            .map((v) => allowedGaps.get(v))
                         : [];
                     const safeRecommendation = typeof parsed?.recommendation === 'string' ? parsed.recommendation.trim() : '';
+                    const isRecommendationValid = safeRecommendation.length >= 20
+                        && sentenceCount(safeRecommendation) >= 2
+                        && sentenceCount(safeRecommendation) <= 4
+                        && !hasSpeculativeLanguage(safeRecommendation);
 
-                    if (safeStrengths.length > 0) strengthsOut = safeStrengths.map(s => s.replace(/^./, c => c.toUpperCase()));
-                    if (safeGaps.length > 0) gapsOut = safeGaps.map(g => g.replace(/^./, c => c.toUpperCase()));
-                    if (safeRecommendation.length >= 20) recommendationOut = safeRecommendation;
+                    strengthsOut = safeStrengths;
+                    gapsOut = safeGaps;
+                    if (isRecommendationValid) recommendationOut = safeRecommendation;
                 }
             } catch {
                 // keep deterministic narrative on AI failure
             }
+        }
+
+        if (strengthsOut.length === 0 && gapsOut.length === 0) {
+            recommendationOut = 'Insufficient structured data for evaluation.';
         }
 
         res.json({
