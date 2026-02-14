@@ -24,6 +24,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const sheetsService = require('./services/sheetsService');
+const cvReviewEngine = require('./services/cvReviewEngine');
 const { calendar, CALENDAR_ID, CALENDAR_INIT_ERROR } = require('./config/googleCalendar');
 const roleModels = require('./config/roleModels');
 const skillOntology = require('./ontology/skills.json');
@@ -910,6 +911,42 @@ app.post('/api/ai/screen', async (req, res) => {
         };
 
         res.json(fused);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/ai/cv-review', async (req, res) => {
+    try {
+        const { parsedResumeText, candidate, optionalJobContext } = req.body || {};
+        const apiKey = process.env.OPENROUTER_API_KEY;
+        const model = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+
+        if (!apiKey) {
+            return res.status(400).json({ error: 'Missing OPENROUTER_API_KEY' });
+        }
+        if (!parsedResumeText || typeof parsedResumeText !== 'string') {
+            return res.status(400).json({ error: 'parsedResumeText is required' });
+        }
+        if (!candidate || typeof candidate !== 'object') {
+            return res.status(400).json({ error: 'candidate object is required' });
+        }
+
+        const result = await cvReviewEngine.reviewCv(
+            {
+                parsedResumeText,
+                candidate,
+                optionalJobContext: optionalJobContext || null
+            },
+            {
+                apiKey,
+                model,
+                siteUrl: process.env.OPENROUTER_SITE_URL,
+                appName: process.env.OPENROUTER_APP_NAME
+            }
+        );
+
+        res.json(result);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
