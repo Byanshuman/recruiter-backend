@@ -1,5 +1,5 @@
 
-const { sheets, SPREADSHEET_ID } = require("../config/googleSheets");
+const { sheets, SPREADSHEET_ID, SHEETS_INIT_ERROR } = require("../config/googleSheets");
 
 /**
  * Safely extracts value from a row array with a fallback.
@@ -194,8 +194,14 @@ const mapObjToRow = (sheetName, obj) => {
 };
 
 const sheetsService = {
+    ensureSheets() {
+        if (!sheets) {
+            throw new Error(SHEETS_INIT_ERROR || "Google Sheets client is not initialized.");
+        }
+    },
     async getRows(sheetName) {
         try {
+            this.ensureSheets();
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
                 range: `${sheetName}!A2:Z`,
@@ -212,6 +218,7 @@ const sheetsService = {
     },
     async getData(sheetName) {
         try {
+            this.ensureSheets();
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
                 range: `${sheetName}!A2:Z`,
@@ -239,6 +246,7 @@ const sheetsService = {
 
     async appendData(sheetName, data) {
         try {
+            this.ensureSheets();
             const row = mapObjToRow(sheetName, data);
             await sheets.spreadsheets.values.append({
                 spreadsheetId: SPREADSHEET_ID,
@@ -255,6 +263,7 @@ const sheetsService = {
 
     async updateData(sheetName, id, data) {
         try {
+            this.ensureSheets();
             if (sheetName === 'Settings') {
                 const row = mapObjToRow(sheetName, data);
                 await sheets.spreadsheets.values.update({
@@ -295,6 +304,7 @@ const sheetsService = {
     },
     async updateRow(sheetName, rowIndex, data) {
         try {
+            this.ensureSheets();
             const row = mapObjToRow(sheetName, data);
             const range = `${sheetName}!A${rowIndex + 2}:Z${rowIndex + 2}`;
             await sheets.spreadsheets.values.update({
@@ -311,6 +321,7 @@ const sheetsService = {
     },
     async clearRow(sheetName, rowIndex) {
         try {
+            this.ensureSheets();
             const range = `${sheetName}!A${rowIndex + 2}:Z${rowIndex + 2}`;
             await sheets.spreadsheets.values.clear({
                 spreadsheetId: SPREADSHEET_ID,
@@ -324,6 +335,7 @@ const sheetsService = {
 
     async deleteData(sheetName, id, fallbackEmail) {
         try {
+            this.ensureSheets();
             if (sheetName === 'Users' && id === 'super-admin-001') {
                 throw new Error("Cannot delete root super admin.");
             }
@@ -354,6 +366,7 @@ const sheetsService = {
     },
 
     async verifyAllTabs() {
+        this.ensureSheets();
         const required = ['Candidates', 'Jobs', 'Interviews', 'Users', 'Settings'];
         const results = {};
         for (const tab of required) {

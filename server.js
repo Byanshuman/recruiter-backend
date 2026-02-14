@@ -23,7 +23,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const sheetsService = require('./services/sheetsService');
-const { calendar, CALENDAR_ID } = require('./config/googleCalendar');
+const { calendar, CALENDAR_ID, CALENDAR_INIT_ERROR } = require('./config/googleCalendar');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -410,6 +410,9 @@ const makeICalUID = (rawId) => {
 
 app.post('/api/calendar/sync', async (req, res) => {
     try {
+        if (!calendar) {
+            return res.status(503).json({ error: CALENDAR_INIT_ERROR || 'Google Calendar client is not initialized.' });
+        }
         const interviews = await sheetsService.getData('Interviews');
         const jobs = await sheetsService.getData('Jobs');
         const jobMap = new Map(jobs.map(j => [j.id, j.title]));

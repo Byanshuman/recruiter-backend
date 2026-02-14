@@ -10,13 +10,15 @@ const DEFAULT_KEY_PATH = path.join(__dirname, "../service-account-key.json");
 const SERVICE_ACCOUNT_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || DEFAULT_KEY_PATH;
 
 let credentials;
+let sheets;
+let SHEETS_INIT_ERROR = null;
 
 if (process.env.GOOGLE_SERVICE_ACCOUNT) {
   try {
     credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
     console.log("Google Sheets credentials loaded from GOOGLE_SERVICE_ACCOUNT.");
   } catch {
-    throw new Error("Failed to parse GOOGLE_SERVICE_ACCOUNT JSON.");
+    SHEETS_INIT_ERROR = "Failed to parse GOOGLE_SERVICE_ACCOUNT JSON.";
   }
 } else if (fs.existsSync(SERVICE_ACCOUNT_FILE)) {
   try {
@@ -24,22 +26,26 @@ if (process.env.GOOGLE_SERVICE_ACCOUNT) {
     credentials = JSON.parse(keyRaw);
     console.log(`Google Sheets credentials loaded from ${SERVICE_ACCOUNT_FILE}.`);
   } catch {
-    throw new Error(`Failed to read service account file: ${SERVICE_ACCOUNT_FILE}`);
+    SHEETS_INIT_ERROR = `Failed to read service account file: ${SERVICE_ACCOUNT_FILE}`;
   }
 } else {
-  throw new Error(
-    "Google Sheets credentials missing. Set GOOGLE_SERVICE_ACCOUNT or place service-account-key.json in recruiter-backend."
-  );
+  SHEETS_INIT_ERROR =
+    "Google Sheets credentials missing. Set GOOGLE_SERVICE_ACCOUNT or place service-account-key.json in recruiter-backend.";
 }
 
-const auth = new google.auth.GoogleAuth({
-  credentials,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-});
+if (credentials) {
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
 
-const sheets = google.sheets({ version: "v4", auth });
+  sheets = google.sheets({ version: "v4", auth });
+} else {
+  console.error(`Google Sheets init skipped: ${SHEETS_INIT_ERROR}`);
+}
 
 module.exports = {
   sheets,
   SPREADSHEET_ID,
+  SHEETS_INIT_ERROR,
 };
