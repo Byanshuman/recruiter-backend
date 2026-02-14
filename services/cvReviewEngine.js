@@ -76,6 +76,25 @@ const extractJson = (text) => {
 
 const promptHash = (text) => crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
 
+const toTitleCase = (value) => String(value || '')
+  .replace(/([A-Z])/g, ' $1')
+  .replace(/[_-]+/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .replace(/^./, (c) => c.toUpperCase());
+
+const normalizeConfidenceValue = (value, fallback = 0.55) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return clamp(value, 0, 1);
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return fallback;
+  if (text === 'high') return 0.85;
+  if (text === 'medium') return 0.65;
+  if (text === 'low') return 0.45;
+  const numeric = Number(text);
+  if (Number.isFinite(numeric)) return clamp(numeric, 0, 1);
+  return fallback;
+};
+
 const evaluateStructure = (input) => {
   const text = input.parsedResumeText || '';
   const candidate = input.candidate || {};
@@ -315,7 +334,7 @@ const sanitizeAiInsights = (raw) => {
     improvements: mapEvidenceItems(raw.improvements),
     seniorityEstimate: String(raw.seniorityEstimate || 'Mid').trim(),
     hiringReadiness: String(raw.hiringReadiness || 'Needs Review').trim(),
-    modelConfidence: round3(clamp(Number(raw.modelConfidence ?? 0.55), 0, 1))
+    modelConfidence: round3(normalizeConfidenceValue(raw.modelConfidence, 0.55))
   };
 
   if (!ai.executiveSummary) return null;
@@ -340,7 +359,15 @@ const guardAiInsights = (ai, input, deterministic) => {
   const strengths = ai.strengths.filter(isEvidenceBacked);
   const improvements = ai.improvements.filter(isEvidenceBacked);
 
-  if (strengths.length === 0 && improvements.length === 0) return null;
+  if (strengths.length === 0 && improvements.length === 0) {
+    return {
+      ...ai,
+      strengths: deterministic.riskFlags.length
+        ? [{ label: 'Deterministic baseline used', evidence: 'AI evidence filtering removed unsupported claims' }]
+        : [{ label: 'Baseline profile signals', evidence: 'Derived from deterministic CV metrics' }],
+      improvements: deterministic.riskFlags.slice(0, 2).map((r) => ({ label: r, evidence: 'Deterministic risk signal' }))
+    };
+  }
 
   return {
     ...ai,
@@ -353,12 +380,12 @@ const deterministicFallbackInsights = (deterministic) => {
   const top = Object.entries(deterministic.breakdown)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 2)
-    .map(([k, v]) => ({ label: k, evidence: `Deterministic sub-score ${v}/20` }));
+    .map(([k, v]) => ({ label: toTitleCase(k), evidence: `Deterministic sub-score ${v}/20` }));
 
   const low = Object.entries(deterministic.breakdown)
     .sort((a, b) => a[1] - b[1])
     .slice(0, 2)
-    .map(([k, v]) => ({ label: k, evidence: `Deterministic sub-score ${v}/20` }));
+    .map(([k, v]) => ({ label: toTitleCase(k), evidence: `Deterministic sub-score ${v}/20` }));
 
   return {
     executiveSummary: 'Deterministic CV review generated due to unavailable or low-confidence AI interpretation.',
@@ -371,7 +398,7 @@ const deterministicFallbackInsights = (deterministic) => {
 };
 
 const mergeHybrid = (deterministic, aiInsights) => {
-  const aiConfidence = round3(clamp(aiInsights.modelConfidence, 0, 1));
+  const aiConfidence = round3(normalizeConfidenceValue(aiInsights.modelConfidence, 0.55));
   const finalConfidence = round3(clamp(
     (deterministic.confidence.dataCompleteness * 0.35) +
     (deterministic.confidence.structuralConfidence * 0.35) +
