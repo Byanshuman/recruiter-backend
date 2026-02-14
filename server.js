@@ -931,6 +931,8 @@ app.post('/api/ai/screen', async (req, res) => {
 
         let fitScoreOut = deterministic.finalFitScore;
         let confidenceOut = deterministic.confidenceScore;
+        let scoringSourceOut = 'deterministic_fallback';
+        let narrativeSourceOut = 'deterministic_fallback';
         const expectedFitScore = Math.round(
             clamp((deterministic.requiredRatio * 60) + (deterministic.preferredRatio * 20) + (deterministic.experienceMatchScore * 20), 0, 100)
         );
@@ -1027,9 +1029,15 @@ app.post('/api/ai/screen', async (req, res) => {
 
                     strengthsOut = safeStrengths;
                     gapsOut = safeGaps;
-                    if (isRecommendationValid) recommendationOut = safeRecommendation;
-                    if (isFitScoreValid && isFitScoreCoherent) fitScoreOut = Math.round(aiFitScore);
-                    if (isConfidenceValid && isConfidenceCoherent) confidenceOut = Number(aiConfidence.toFixed(3));
+                    if (isRecommendationValid) {
+                        recommendationOut = safeRecommendation;
+                        narrativeSourceOut = 'ai';
+                    }
+                    const aiScoreAccepted = isFitScoreValid && isFitScoreCoherent;
+                    const aiConfidenceAccepted = isConfidenceValid && isConfidenceCoherent;
+                    if (aiScoreAccepted) fitScoreOut = Math.round(aiFitScore);
+                    if (aiConfidenceAccepted) confidenceOut = Number(aiConfidence.toFixed(3));
+                    if (aiScoreAccepted && aiConfidenceAccepted) scoringSourceOut = 'ai';
                 }
             } catch {
                 // keep deterministic fallback on AI failure
@@ -1049,7 +1057,9 @@ app.post('/api/ai/screen', async (req, res) => {
             requiredRatio: deterministic.requiredRatio,
             preferredRatio: deterministic.preferredRatio,
             experienceMatchScore: deterministic.experienceMatchScore,
-            scoringModelVersion: skillMatchEngine.SCORING_MODEL_VERSION
+            scoringModelVersion: skillMatchEngine.SCORING_MODEL_VERSION,
+            scoringSource: scoringSourceOut,
+            narrativeSource: narrativeSourceOut
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
