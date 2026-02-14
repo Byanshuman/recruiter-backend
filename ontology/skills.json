@@ -1,0 +1,14 @@
+{
+  "communication": ["communication", "verbal skills", "interpersonal", "active listening", "listening"],
+  "counseling": ["counselling", "counseling", "therapy", "guidance", "family counselling", "family counseling"],
+  "emotional_awareness": ["emotional awareness", "empathy", "empathetic communication", "emotional intelligence"],
+  "hindi": ["hindi"],
+  "hinglish": ["hinglish"],
+  "nodejs": ["node.js", "nodejs", "backend javascript"],
+  "react": ["react", "reactjs", "react.js"],
+  "typescript": ["typescript", "ts"],
+  "javascript": ["javascript", "js"],
+  "python": ["python"],
+  "sql": ["sql", "postgresql", "mysql"],
+  "leadership": ["leadership", "initiative", "ownership"]
+}

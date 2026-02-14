@@ -22,8 +22,13 @@ if (fs.existsSync(envPath)) {
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const sheetsService = require('./services/sheetsService');
 const { calendar, CALENDAR_ID, CALENDAR_INIT_ERROR } = require('./config/googleCalendar');
+const roleModels = require('./config/roleModels');
+const skillOntology = require('./ontology/skills.json');
+
+const RIE_MODEL_VERSION = 'RIE-v2.1';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -515,24 +520,6 @@ const splitNameFromEmail = (email) => {
     return normalizeName(parts.join(' '));
 };
 
-const sanitizeAiScreenResult = (raw) => {
-    if (!raw || typeof raw !== 'object') return null;
-    const fitScore = Number(raw.fitScore);
-    const confidence = Number(raw.confidence);
-    if (!Number.isFinite(fitScore) || fitScore < 0 || fitScore > 100) return null;
-    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) return null;
-    const strengths = Array.isArray(raw.strengths) ? raw.strengths.filter(Boolean).map(String) : [];
-    const gaps = Array.isArray(raw.gaps) ? raw.gaps.filter(Boolean).map(String) : [];
-    const recommendation = typeof raw.recommendation === 'string' ? raw.recommendation : '';
-    return {
-        fitScore: Math.round(fitScore),
-        confidence: Math.round(confidence * 1000) / 1000,
-        strengths,
-        gaps,
-        recommendation
-    };
-};
-
 const AI_STOPWORDS = new Set([
     'and', 'or', 'the', 'a', 'an', 'to', 'of', 'for', 'with', 'in', 'on', 'at', 'by', 'from', 'as',
     'is', 'are', 'this', 'that', 'be', 'will', 'we', 'you', 'our', 'your', 'candidate', 'job'
@@ -545,103 +532,285 @@ const tokenizeText = (value) => String(value || '')
     .filter(token => token.length > 2 && !AI_STOPWORDS.has(token));
 
 const uniqueList = (items) => Array.from(new Set((items || []).map(String).map(v => v.trim()).filter(Boolean)));
-
 const capList = (items, size = 4) => uniqueList(items).slice(0, size);
-
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
-const buildScreenSignals = (candidate, job) => {
-    const candidateSkills = Array.isArray(candidate?.skills) ? candidate.skills.map(String) : [];
-    const requiredSkills = Array.isArray(job?.requiredSkills) ? job.requiredSkills.map(String) : [];
-    const preferredSkills = Array.isArray(job?.preferredSkills) ? job.preferredSkills.map(String) : [];
+const ONTOLOGY_INDEX = (() => {
+    const index = new Map();
+    Object.entries(skillOntology || {}).forEach(([canonical, variants]) => {
+        index.set(String(canonical).toLowerCase(), canonical);
+        (variants || []).forEach(v => index.set(String(v).toLowerCase(), canonical));
+    });
+    return index;
+})();
 
-    const candidateTokens = new Set([
+const normalizeSkill = (skill) => {
+    const raw = String(skill || '').trim();
+    if (!raw) return '';
+    const exact = ONTOLOGY_INDEX.get(raw.toLowerCase());
+    if (exact) return exact;
+    const tokens = tokenizeText(raw);
+    for (const token of tokens) {
+        const mapped = ONTOLOGY_INDEX.get(token);
+        if (mapped) return mapped;
+    }
+    return raw.toLowerCase();
+};
+
+const normalizeSkillList = (skills) => capList((skills || []).map(normalizeSkill).filter(Boolean), 50);
+
+const inferRoleModel = (job) => {
+    const context = `${job?.title || ''} ${job?.department || ''} ${job?.description || ''}`.toLowerCase();
+    if (/counsel|therapy|psycholog|wellness|mental/.test(context)) return { key: 'counseling', weights: roleModels.counseling };
+    if (/engineer|developer|software|frontend|backend|devops|data/.test(context)) return { key: 'tech', weights: roleModels.tech };
+    return { key: 'default', weights: roleModels.default };
+};
+
+const promptHash = (prompt) => crypto.createHash('sha256').update(prompt).digest('hex').slice(0, 16);
+
+const toStrengthObject = (label, matchedWith, weightImpact) => ({
+    label,
+    evidence: `Mapped from candidate.skills`,
+    matchedWith,
+    weightImpact: Math.round(weightImpact)
+});
+
+const toGapObject = (label, reason, impactLevel) => ({
+    label,
+    reason,
+    impactLevel
+});
+
+const sanitizeAiScreenResult = (raw) => {
+    if (!raw || typeof raw !== 'object') return null;
+    const fitScore = Number(raw.fitScore);
+    const modelConfidence = Number(raw.modelConfidence ?? raw.confidence);
+    if (!Number.isFinite(fitScore) || fitScore < 0 || fitScore > 100) return null;
+    if (!Number.isFinite(modelConfidence) || modelConfidence < 0 || modelConfidence > 1) return null;
+
+    const strengths = Array.isArray(raw.strengths) ? raw.strengths.map((s) => {
+        if (typeof s === 'string') {
+            return { label: s.trim(), evidence: 'AI inferred from provided data', matchedWith: 'Job profile', weightImpact: 6 };
+        }
+        return {
+            label: String(s?.label || '').trim(),
+            evidence: String(s?.evidence || 'AI inferred from provided data').trim(),
+            matchedWith: String(s?.matchedWith || 'Job profile').trim(),
+            weightImpact: Number.isFinite(Number(s?.weightImpact)) ? Number(s.weightImpact) : 6
+        };
+    }).filter(s => s.label) : [];
+
+    const gaps = Array.isArray(raw.gaps) ? raw.gaps.map((g) => {
+        if (typeof g === 'string') {
+            return { label: g.trim(), reason: 'Missing or weak evidence', impactLevel: 'medium' };
+        }
+        return {
+            label: String(g?.label || '').trim(),
+            reason: String(g?.reason || 'Missing or weak evidence').trim(),
+            impactLevel: String(g?.impactLevel || 'medium').toLowerCase()
+        };
+    }).filter(g => g.label) : [];
+
+    const riskFlags = capList(Array.isArray(raw.riskFlags) ? raw.riskFlags.map(String) : [], 6);
+    const recommendation = typeof raw.recommendation === 'string' ? raw.recommendation.trim() : '';
+
+    return {
+        fitScore: Math.round(fitScore),
+        modelConfidence: Math.round(modelConfidence * 1000) / 1000,
+        strengths: capList(strengths, 4),
+        gaps: capList(gaps, 4),
+        riskFlags,
+        recommendation
+    };
+};
+
+const buildDeterministicSignals = (candidate, job) => {
+    const candidateSkills = normalizeSkillList(candidate?.skills);
+    const requiredSkills = normalizeSkillList(job?.requiredSkills);
+    const preferredSkills = normalizeSkillList(job?.preferredSkills);
+    const { key: roleKey, weights } = inferRoleModel(job);
+
+    const candidateTokenSet = new Set([
         ...tokenizeText(candidate?.role),
         ...candidateSkills.flatMap(tokenizeText)
     ]);
 
-    const matchedRequired = requiredSkills.filter(skill => tokenizeText(skill).some(t => candidateTokens.has(t)));
+    const matches = (skills) => skills.filter(skill => tokenizeText(skill).some(t => candidateTokenSet.has(t)));
+    const matchedRequired = matches(requiredSkills);
+    const matchedPreferred = matches(preferredSkills);
     const missingRequired = requiredSkills.filter(skill => !matchedRequired.includes(skill));
-    const matchedPreferred = preferredSkills.filter(skill => tokenizeText(skill).some(t => candidateTokens.has(t)));
     const missingPreferred = preferredSkills.filter(skill => !matchedPreferred.includes(skill));
+
+    const requiredCoverage = requiredSkills.length ? matchedRequired.length / requiredSkills.length : 0.5;
+    const preferredCoverage = preferredSkills.length ? matchedPreferred.length / preferredSkills.length : 0.5;
 
     const minExperience = Number(job?.minExperience) || 0;
     const candidateExperience = Number(candidate?.experience) || 0;
+    const experienceMatch = minExperience > 0
+        ? clamp(candidateExperience / minExperience, 0, 1)
+        : 0.8;
     const experienceGap = Math.max(0, minExperience - candidateExperience);
 
-    const requiredRatio = requiredSkills.length > 0 ? matchedRequired.length / requiredSkills.length : 0.5;
-    const preferredRatio = preferredSkills.length > 0 ? matchedPreferred.length / preferredSkills.length : 0.5;
-    const experienceScore = minExperience > 0
-        ? (candidateExperience >= minExperience ? 1 : clamp(1 - (experienceGap / Math.max(minExperience, 1)), 0, 1))
-        : 0.8;
+    const rawFit = (
+        (requiredCoverage * weights.requiredWeight) +
+        (preferredCoverage * weights.preferredWeight) +
+        (experienceMatch * weights.experienceWeight) +
+        ((matchedPreferred.length > 0 ? 1 : 0.6) * (weights.softSkillWeight || 0))
+    ) * 100;
+    const fitScore = Math.round(clamp(rawFit, 0, 100));
 
-    const fitScore = Math.round(clamp(30 + (requiredRatio * 45) + (preferredRatio * 15) + (experienceScore * 10), 0, 100));
-    const confidence = Math.round(clamp(0.55 + (requiredSkills.length > 0 ? 0.1 : 0) + (preferredSkills.length > 0 ? 0.05 : 0), 0.45, 0.95) * 1000) / 1000;
+    const candidateDataFields = ['name', 'email', 'role', 'experience'];
+    const dataCompleteness = clamp(
+        (
+            candidateDataFields.filter(k => String(candidate?.[k] || '').trim().length > 0).length +
+            (candidateSkills.length > 0 ? 1 : 0) +
+            (requiredSkills.length > 0 ? 1 : 0)
+        ) / (candidateDataFields.length + 2),
+        0,
+        1
+    );
+
+    const coverageConfidence = clamp((requiredCoverage * 0.7) + (preferredCoverage * 0.2) + (experienceMatch * 0.1), 0, 1);
 
     const strengths = capList([
-        ...matchedRequired,
-        ...matchedPreferred,
+        ...matchedRequired.map(label => toStrengthObject(label, 'Job.requiredSkills', 10)),
+        ...matchedPreferred.map(label => toStrengthObject(label, 'Job.preferredSkills', 6)),
         ...candidateSkills
-    ]);
+            .filter(s => !matchedRequired.includes(s) && !matchedPreferred.includes(s))
+            .slice(0, 2)
+            .map(label => toStrengthObject(label, 'Candidate.profile', 3))
+    ], 4);
 
     const gaps = capList([
-        ...missingRequired,
-        ...missingPreferred,
-        ...(experienceGap > 0 ? [`Needs ${experienceGap} more year(s) experience for role baseline`] : [])
-    ]);
+        ...missingRequired.map(label => toGapObject(label, 'Required but missing', 'high')),
+        ...missingPreferred.map(label => toGapObject(label, 'Preferred but missing', 'medium')),
+        ...(experienceGap > 0 ? [toGapObject('experience', `Experience short by ${experienceGap} year(s)`, 'high')] : [])
+    ], 4);
+
+    const riskFlags = capList([
+        ...(requiredCoverage < 0.5 ? ['Low required-skill coverage'] : []),
+        ...(experienceGap > 0 ? ['Experience below requirement'] : []),
+        ...(dataCompleteness < 0.6 ? ['Incomplete candidate profile data'] : [])
+    ], 6);
 
     const recommendation = fitScore >= 80
-        ? 'Strong fit. Fast-track to interview and validate depth through practical scenarios.'
+        ? 'Strong fit. Fast-track to interview with scenario-based validation.'
         : fitScore >= 60
-            ? 'Moderate fit. Proceed with a structured screen focused on missing role requirements.'
-            : 'Partial fit. Consider alternate openings or targeted upskilling before progression.';
+            ? 'Moderate fit. Continue with structured screening focused on missing skills.'
+            : 'Partial fit. Consider alternate role mapping or targeted upskilling plan.';
 
     return {
         fitScore,
-        confidence,
-        strengths: strengths.length ? strengths : capList(candidateSkills, 3),
-        gaps: gaps.length ? gaps : ['Limited evidence against stated requirements'],
+        coverage: {
+            requiredCoverage: Math.round(requiredCoverage * 1000) / 1000,
+            preferredCoverage: Math.round(preferredCoverage * 1000) / 1000,
+            experienceMatch: Math.round(experienceMatch * 1000) / 1000
+        },
+        confidence: {
+            modelConfidence: 0.65,
+            dataCompleteness: Math.round(dataCompleteness * 1000) / 1000,
+            coverageConfidence: Math.round(coverageConfidence * 1000) / 1000,
+            finalConfidence: Math.round(((dataCompleteness * 0.35) + (coverageConfidence * 0.65)) * 1000) / 1000
+        },
+        strengths,
+        gaps,
+        riskFlags,
         recommendation,
-        matchedRequired,
-        missingRequired,
-        matchedPreferred,
-        missingPreferred,
-        minExperience,
-        candidateExperience
+        deterministicSignals: {
+            roleModel: roleKey,
+            matchedRequired,
+            missingRequired,
+            matchedPreferred,
+            missingPreferred,
+            minExperience,
+            candidateExperience
+        },
+        scoringWeights: weights
     };
 };
 
-const isLineRelevant = (line, signals) => {
-    const tokens = tokenizeText(line);
+const isEvidenceBacked = (text, deterministic) => {
+    const tokens = tokenizeText(text);
     if (tokens.length === 0) return false;
-    const allowedTokens = new Set([
-        ...signals.strengths.flatMap(tokenizeText),
-        ...signals.gaps.flatMap(tokenizeText),
-        ...signals.matchedRequired.flatMap(tokenizeText),
-        ...signals.missingRequired.flatMap(tokenizeText),
-        ...signals.matchedPreferred.flatMap(tokenizeText),
-        ...signals.missingPreferred.flatMap(tokenizeText)
+    const evidencePool = new Set([
+        ...deterministic.strengths.map(s => s.label).flatMap(tokenizeText),
+        ...deterministic.gaps.map(g => g.label).flatMap(tokenizeText),
+        ...deterministic.deterministicSignals.matchedRequired.flatMap(tokenizeText),
+        ...deterministic.deterministicSignals.missingRequired.flatMap(tokenizeText),
+        ...deterministic.deterministicSignals.matchedPreferred.flatMap(tokenizeText),
+        ...deterministic.deterministicSignals.missingPreferred.flatMap(tokenizeText)
     ]);
-    return tokens.some(token => allowedTokens.has(token));
+    return tokens.some(t => evidencePool.has(t));
 };
 
-const mergeAiWithDeterministic = (ai, baseline) => {
-    if (!ai) return baseline;
+const fuseRieResult = (ai, deterministic, meta) => {
+    if (!ai) {
+        return {
+            modelVersion: RIE_MODEL_VERSION,
+            fitScore: deterministic.fitScore,
+            confidence: deterministic.confidence,
+            coverage: deterministic.coverage,
+            strengths: deterministic.strengths,
+            gaps: deterministic.gaps,
+            riskFlags: deterministic.riskFlags,
+            recommendation: deterministic.recommendation,
+            explainability: {
+                deterministicWeight: 1,
+                aiWeight: 0
+            },
+            scoringWeights: deterministic.scoringWeights,
+            promptHash: meta.promptHash,
+            timestamp: new Date().toISOString(),
+            deterministicSignals: deterministic.deterministicSignals
+        };
+    }
 
-    const filteredStrengths = capList((ai.strengths || []).filter(item => isLineRelevant(item, baseline)));
-    const filteredGaps = capList((ai.gaps || []).filter(item => isLineRelevant(item, baseline)));
+    const deterministicWeight = 0.3;
+    const aiWeight = 0.7;
+    const fitScore = Math.round(clamp((ai.fitScore * aiWeight) + (deterministic.fitScore * deterministicWeight), 0, 100));
+    const modelConfidence = Math.round(clamp((ai.modelConfidence * aiWeight) + (deterministic.confidence.modelConfidence * deterministicWeight), 0, 1) * 1000) / 1000;
+    const finalConfidence = Math.round(
+        clamp(
+            (modelConfidence * 0.45) +
+            (deterministic.confidence.dataCompleteness * 0.25) +
+            (deterministic.confidence.coverageConfidence * 0.30),
+            0,
+            1
+        ) * 1000
+    ) / 1000;
 
-    const blendedFit = Math.round(clamp((ai.fitScore * 0.7) + (baseline.fitScore * 0.3), 0, 100));
-    const blendedConfidence = Math.round(clamp((ai.confidence * 0.7) + (baseline.confidence * 0.3), 0.45, 0.98) * 1000) / 1000;
+    const strengths = capList(
+        ai.strengths.filter(s => isEvidenceBacked(`${s.label} ${s.evidence}`, deterministic)),
+        4
+    );
+    const gaps = capList(
+        ai.gaps.filter(g => isEvidenceBacked(`${g.label} ${g.reason}`, deterministic)),
+        4
+    );
 
     return {
-        fitScore: blendedFit,
-        confidence: blendedConfidence,
-        strengths: filteredStrengths.length >= 2 ? filteredStrengths : baseline.strengths,
-        gaps: filteredGaps.length >= 2 ? filteredGaps : baseline.gaps,
-        recommendation: (ai.recommendation && String(ai.recommendation).trim().length > 20)
-            ? String(ai.recommendation).trim()
-            : baseline.recommendation
+        modelVersion: RIE_MODEL_VERSION,
+        fitScore,
+        confidence: {
+            modelConfidence,
+            dataCompleteness: deterministic.confidence.dataCompleteness,
+            coverageConfidence: deterministic.confidence.coverageConfidence,
+            finalConfidence
+        },
+        coverage: deterministic.coverage,
+        strengths: strengths.length >= 2 ? strengths : deterministic.strengths,
+        gaps: gaps.length >= 2 ? gaps : deterministic.gaps,
+        riskFlags: capList([...deterministic.riskFlags, ...ai.riskFlags], 6),
+        recommendation: ai.recommendation || deterministic.recommendation,
+        explainability: {
+            deterministicWeight,
+            aiWeight
+        },
+        scoringWeights: deterministic.scoringWeights,
+        promptHash: meta.promptHash,
+        timestamp: new Date().toISOString(),
+        deterministicSignals: deterministic.deterministicSignals,
+        aiRawResponse: meta.aiRawResponse
     };
 };
 
@@ -657,27 +826,27 @@ app.post('/api/ai/screen', async (req, res) => {
             return res.status(400).json({ error: 'Missing candidate or job payload' });
         }
 
-        const deterministic = buildScreenSignals(candidate, job);
+        const deterministic = buildDeterministicSignals(candidate, job);
 
         const systemPrompt = [
-            'You are an expert recruitment analyst.',
-            'Use ONLY the supplied signals and payload. Do not invent requirements or qualifications.',
-            'Never infer language, geography, certifications, or domain experience unless explicitly present in the provided data.',
-            'Strengths must come from matched skills/evidence. Gaps must come from missing required/preferred skills or experience gap.',
-            'Return a strict JSON object with keys: fitScore (0-100 integer), confidence (0-1 number), strengths (array max 4 concise strings), gaps (array max 4 concise strings), recommendation (string).',
-            'Do not include any extra text outside JSON.'
+            'You are MM Recruiter Intelligence Engine (RIE) AI interpretation layer.',
+            'You must reason only from provided candidate/job data and deterministic signals.',
+            'Never invent missing qualifications, language, geography, certifications, or domain facts.',
+            'Return strict JSON with keys: fitScore (0-100 integer), modelConfidence (0-1), strengths (max 4 objects), gaps (max 4 objects), riskFlags (max 6 strings), recommendation (string).',
+            'Each strength object: {label, evidence, matchedWith, weightImpact}.',
+            'Each gap object: {label, reason, impactLevel}.',
+            'Do not include text outside JSON.'
         ].join(' ');
 
-        const userPrompt = `Candidate:\n${JSON.stringify(candidate)}\n\nJob:\n${JSON.stringify(job)}\n\nDeterministicSignals:\n${JSON.stringify({
-            matchedRequired: deterministic.matchedRequired,
-            missingRequired: deterministic.missingRequired,
-            matchedPreferred: deterministic.matchedPreferred,
-            missingPreferred: deterministic.missingPreferred,
-            minExperience: deterministic.minExperience,
-            candidateExperience: deterministic.candidateExperience,
-            baselineFitScore: deterministic.fitScore,
-            baselineConfidence: deterministic.confidence
-        })}`;
+        const promptPayload = {
+            candidate,
+            job,
+            deterministicSignals: deterministic.deterministicSignals,
+            coverage: deterministic.coverage,
+            baselineFitScore: deterministic.fitScore
+        };
+        const userPrompt = JSON.stringify(promptPayload);
+        const mergedPrompt = `${systemPrompt}\n${userPrompt}`;
 
         const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
@@ -693,7 +862,7 @@ app.post('/api/ai/screen', async (req, res) => {
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: userPrompt }
                 ],
-                temperature: 0.2
+                temperature: 0.15
             })
         });
 
@@ -705,8 +874,23 @@ app.post('/api/ai/screen', async (req, res) => {
         const data = await response.json();
         const content = data?.choices?.[0]?.message?.content || '';
         const parsed = extractJson(content);
-        const sanitized = sanitizeAiScreenResult(parsed);
-        res.json(mergeAiWithDeterministic(sanitized, deterministic));
+        const aiStructured = sanitizeAiScreenResult(parsed);
+        const fused = fuseRieResult(aiStructured, deterministic, {
+            promptHash: promptHash(mergedPrompt),
+            aiRawResponse: content
+        });
+
+        // Legacy compatibility fields for existing UI consumers.
+        fused.confidenceScore = fused.confidence.finalConfidence;
+        fused.legacy = {
+            fitScore: fused.fitScore,
+            confidence: fused.confidence.finalConfidence,
+            strengths: fused.strengths.map(s => s.label),
+            gaps: fused.gaps.map(g => g.label),
+            recommendation: fused.recommendation
+        };
+
+        res.json(fused);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
