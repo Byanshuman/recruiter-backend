@@ -887,80 +887,47 @@ const fuseRieResult = (ai, deterministic, meta) => {
 app.post('/api/ai/screen', async (req, res) => {
     try {
         const { candidate, job } = req.body || {};
-        const apiKey = process.env.OPENROUTER_API_KEY;
-        const model = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
-        if (!apiKey) {
-            return res.status(400).json({ error: 'Missing OPENROUTER_API_KEY' });
-        }
         if (!candidate || !job) {
             return res.status(400).json({ error: 'Missing candidate or job payload' });
         }
 
-        const deterministic = buildDeterministicSignals(candidate, job);
-
-        const systemPrompt = [
-            'You are MM Recruiter Intelligence Engine (RIE) AI interpretation layer.',
-            'You must reason only from provided candidate/job data and deterministic signals.',
-            'Never invent missing qualifications, language, geography, certifications, or domain facts.',
-            'Return strict JSON with keys: fitScore (0-100 integer), modelConfidence (0-1), strengths (max 4 objects), gaps (max 4 objects), riskFlags (max 6 strings), recommendation (string).',
-            'Each strength object: {label, evidence, matchedWith, weightImpact}.',
-            'Each gap object: {label, reason, impactLevel}.',
-            'Do not include text outside JSON.'
-        ].join(' ');
-
-        const promptPayload = {
-            candidate,
-            job,
-            deterministicSignals: deterministic.deterministicSignals,
-            coverage: deterministic.coverage,
-            baselineFitScore: deterministic.fitScore
+        // Deterministic-only strategy score: strict skill match + experience, no inferred skills.
+        const parsedCandidate = {
+            name: candidate.name || 'Not Found',
+            experienceYears: Number(candidate.experience) || 0,
+            skills: Array.isArray(candidate.skills) ? candidate.skills : []
         };
-        const userPrompt = JSON.stringify(promptPayload);
-        const mergedPrompt = `${systemPrompt}\n${userPrompt}`;
-
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                ...(process.env.OPENROUTER_SITE_URL ? { 'HTTP-Referer': process.env.OPENROUTER_SITE_URL } : {}),
-                ...(process.env.OPENROUTER_APP_NAME ? { 'X-Title': process.env.OPENROUTER_APP_NAME } : {})
-            },
-            body: JSON.stringify({
-                model,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: userPrompt }
-                ],
-                temperature: 0.15
-            })
+        const deterministic = skillMatchEngine.evaluateSkillMatch({
+            parsed: parsedCandidate,
+            job
         });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            return res.status(response.status).json({ error: errorText || 'OpenRouter request failed' });
-        }
+        const strengths = [
+            ...deterministic.matchedRequiredSkills,
+            ...deterministic.matchedPreferredSkills
+        ];
+        const gaps = [
+            ...deterministic.missingRequiredSkills,
+            ...deterministic.missingPreferredSkills
+        ];
 
-        const data = await response.json();
-        const content = data?.choices?.[0]?.message?.content || '';
-        const parsed = extractJson(content);
-        const aiStructured = sanitizeAiScreenResult(parsed);
-        const fused = fuseRieResult(aiStructured, deterministic, {
-            promptHash: promptHash(mergedPrompt),
-            aiRawResponse: content
+        const recommendation = deterministic.hiringRecommendation === 'Strong Match'
+            ? 'Strongly recommend for interview progression based on required skill alignment and experience fit.'
+            : deterministic.hiringRecommendation === 'Moderate Match'
+                ? 'Moderate fit. Proceed with targeted screening for missing required capabilities.'
+                : 'Weak fit. Consider alternate role mapping or skill-bridge plan before progression.';
+
+        res.json({
+            fitScore: deterministic.finalFitScore,
+            confidence: deterministic.confidenceScore,
+            strengths: strengths.length > 0 ? strengths : ['No explicitly matched skills found'],
+            gaps: gaps.length > 0 ? gaps : ['No major skill gaps identified'],
+            recommendation,
+            requiredRatio: deterministic.requiredRatio,
+            preferredRatio: deterministic.preferredRatio,
+            experienceMatchScore: deterministic.experienceMatchScore,
+            scoringModelVersion: skillMatchEngine.SCORING_MODEL_VERSION
         });
-
-        // Legacy compatibility fields for existing UI consumers.
-        fused.confidenceScore = fused.confidence.finalConfidence;
-        fused.legacy = {
-            fitScore: fused.fitScore,
-            confidence: fused.confidence.finalConfidence,
-            strengths: fused.strengths.map(s => s.label),
-            gaps: fused.gaps.map(g => g.label),
-            recommendation: fused.recommendation
-        };
-
-        res.json(fused);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

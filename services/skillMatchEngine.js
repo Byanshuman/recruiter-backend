@@ -136,6 +136,9 @@ const pickHiringRecommendation = (score) => {
 
 const evaluateSkillMatch = ({ parsed, job }) => {
   const candidateSkills = parsed.skills[0] === 'Not Found' ? [] : uniqueNormalized(parsed.skills);
+  const workExperienceRoles = Array.isArray(parsed.workExperienceRoles) ? parsed.workExperienceRoles : [];
+  const certifications = Array.isArray(parsed.certifications) ? parsed.certifications : [];
+  const education = parsed.education || 'Not Found';
   const required = uniqueNormalized(job.requiredSkills || []);
   const preferred = uniqueNormalized(job.preferredSkills || []);
 
@@ -161,9 +164,9 @@ const evaluateSkillMatch = ({ parsed, job }) => {
     parsed.name && parsed.name !== 'Not Found',
     Number.isFinite(expYears) && expYears > 0,
     candidateSkills.length > 0,
-    parsed.workExperienceRoles.length > 0,
-    parsed.education && parsed.education !== 'Not Found',
-    parsed.certifications.length > 0 && parsed.certifications[0] !== 'Not Found'
+    workExperienceRoles.length > 0,
+    education && education !== 'Not Found',
+    certifications.length > 0 && certifications[0] !== 'Not Found'
   ];
   const dataCompleteness = requiredFields.filter(Boolean).length / requiredFields.length;
   const confidenceScore = clamp(
