@@ -26,7 +26,9 @@ const sheetsService = require('./services/sheetsService');
 const { calendar, CALENDAR_ID } = require('./config/googleCalendar');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8080;
+app.listen(PORT);
+
 
 app.use(cors());
 app.use(express.json());
