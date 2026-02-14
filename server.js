@@ -531,8 +531,24 @@ const tokenizeText = (value) => String(value || '')
     .map(token => token.trim())
     .filter(token => token.length > 2 && !AI_STOPWORDS.has(token));
 
-const uniqueList = (items) => Array.from(new Set((items || []).map(String).map(v => v.trim()).filter(Boolean)));
-const capList = (items, size = 4) => uniqueList(items).slice(0, size);
+const capList = (items, size = 4, keySelector) => {
+    const out = [];
+    const seen = new Set();
+    for (const item of (items || [])) {
+        if (item === null || item === undefined) continue;
+        const key = keySelector
+            ? keySelector(item)
+            : (typeof item === 'string'
+                ? item.trim().toLowerCase()
+                : JSON.stringify(item));
+        if (!key) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(item);
+        if (out.length >= size) break;
+    }
+    return out;
+};
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 const ONTOLOGY_INDEX = (() => {
@@ -557,7 +573,8 @@ const normalizeSkill = (skill) => {
     return raw.toLowerCase();
 };
 
-const normalizeSkillList = (skills) => capList((skills || []).map(normalizeSkill).filter(Boolean), 50);
+const normalizeSkillList = (skills) =>
+    capList((skills || []).map(normalizeSkill).filter(Boolean), 50, s => String(s).trim().toLowerCase());
 
 const inferRoleModel = (job) => {
     const context = `${job?.title || ''} ${job?.department || ''} ${job?.description || ''}`.toLowerCase();
@@ -611,14 +628,14 @@ const sanitizeAiScreenResult = (raw) => {
         };
     }).filter(g => g.label) : [];
 
-    const riskFlags = capList(Array.isArray(raw.riskFlags) ? raw.riskFlags.map(String) : [], 6);
+    const riskFlags = capList(Array.isArray(raw.riskFlags) ? raw.riskFlags.map(String) : [], 6, v => String(v).trim().toLowerCase());
     const recommendation = typeof raw.recommendation === 'string' ? raw.recommendation.trim() : '';
 
     return {
         fitScore: Math.round(fitScore),
         modelConfidence: Math.round(modelConfidence * 1000) / 1000,
-        strengths: capList(strengths, 4),
-        gaps: capList(gaps, 4),
+        strengths: capList(strengths, 4, s => String(s?.label || '').trim().toLowerCase()),
+        gaps: capList(gaps, 4, g => String(g?.label || '').trim().toLowerCase()),
         riskFlags,
         recommendation
     };
@@ -679,19 +696,19 @@ const buildDeterministicSignals = (candidate, job) => {
             .filter(s => !matchedRequired.includes(s) && !matchedPreferred.includes(s))
             .slice(0, 2)
             .map(label => toStrengthObject(label, 'Candidate.profile', 3))
-    ], 4);
+    ], 4, s => String(s?.label || '').trim().toLowerCase());
 
     const gaps = capList([
         ...missingRequired.map(label => toGapObject(label, 'Required but missing', 'high')),
         ...missingPreferred.map(label => toGapObject(label, 'Preferred but missing', 'medium')),
         ...(experienceGap > 0 ? [toGapObject('experience', `Experience short by ${experienceGap} year(s)`, 'high')] : [])
-    ], 4);
+    ], 4, g => String(g?.label || '').trim().toLowerCase());
 
     const riskFlags = capList([
         ...(requiredCoverage < 0.5 ? ['Low required-skill coverage'] : []),
         ...(experienceGap > 0 ? ['Experience below requirement'] : []),
         ...(dataCompleteness < 0.6 ? ['Incomplete candidate profile data'] : [])
-    ], 6);
+    ], 6, v => String(v).trim().toLowerCase());
 
     const recommendation = fitScore >= 80
         ? 'Strong fit. Fast-track to interview with scenario-based validation.'
@@ -781,11 +798,13 @@ const fuseRieResult = (ai, deterministic, meta) => {
 
     const strengths = capList(
         ai.strengths.filter(s => isEvidenceBacked(`${s.label} ${s.evidence}`, deterministic)),
-        4
+        4,
+        s => String(s?.label || '').trim().toLowerCase()
     );
     const gaps = capList(
         ai.gaps.filter(g => isEvidenceBacked(`${g.label} ${g.reason}`, deterministic)),
-        4
+        4,
+        g => String(g?.label || '').trim().toLowerCase()
     );
 
     return {
@@ -800,7 +819,7 @@ const fuseRieResult = (ai, deterministic, meta) => {
         coverage: deterministic.coverage,
         strengths: strengths.length >= 2 ? strengths : deterministic.strengths,
         gaps: gaps.length >= 2 ? gaps : deterministic.gaps,
-        riskFlags: capList([...deterministic.riskFlags, ...ai.riskFlags], 6),
+        riskFlags: capList([...deterministic.riskFlags, ...ai.riskFlags], 6, v => String(v).trim().toLowerCase()),
         recommendation: ai.recommendation || deterministic.recommendation,
         explainability: {
             deterministicWeight,
